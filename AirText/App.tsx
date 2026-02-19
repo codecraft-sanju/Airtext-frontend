@@ -1,13 +1,14 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { 
-  View, Text, TextInput, Button, StyleSheet, 
-  PermissionsAndroid, ScrollView, Alert, ActivityIndicator, 
-  TouchableOpacity, ToastAndroid, StatusBar, Platform, FlatList, RefreshControl 
+    View, Text, TextInput, Button, StyleSheet, 
+    PermissionsAndroid, ScrollView, Alert, ActivityIndicator, 
+    TouchableOpacity, ToastAndroid, StatusBar, Platform, FlatList, RefreshControl, Animated
 } from 'react-native';
 import io from 'socket.io-client';
 import SmsAndroid from 'react-native-get-sms-android';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import BackgroundService from 'react-native-background-actions';
+import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 
 const API_URL = 'https://airtext-fo6q.onrender.com';
 
@@ -18,7 +19,8 @@ const CODE_EXAMPLES = {
 await axios.post('${API_URL}/send-sms', {
     apiKey: 'YOUR_API_KEY',
     phone: '+919876543210',
-    msg: 'Hello from Node.js!'
+    msg: 'Hello from Node.js!',
+    webhookUrl: 'https://your-site.com/webhook'
 });`,
     python: `import requests
 
@@ -26,12 +28,13 @@ url = "${API_URL}/send-sms"
 data = {
     "apiKey": "YOUR_API_KEY",
     "phone": "+919876543210",
-    "msg": "Hello from Python!"
+    "msg": "Hello from Python!",
+    "webhookUrl": "https://your-site.com/webhook"
 }
 requests.post(url, json=data)`,
     curl: `curl -X POST ${API_URL}/send-sms \\
 -H "Content-Type: application/json" \\
--d '{"apiKey": "KEY", "phone": "NUMBER", "msg": "TEXT"}'`
+-d '{"apiKey": "KEY", "phone": "NUMBER", "msg": "TEXT", "webhookUrl": "https://your-site.com/webhook"}'`
 };
 
 // --- 🌙 BACKGROUND TASK LOGIC ---
@@ -39,7 +42,7 @@ const sleep = (time) => new Promise((resolve) => setTimeout(() => resolve(), tim
 
 const backgroundTask = async (taskDataArguments) => {
     const { deviceId, apiUrl, userName } = taskDataArguments;
-    console.log("🌙 Background Service Starting...");
+    console.log("Background Service Starting...");
     
     const socket = io(apiUrl, {
         auth: { deviceId: deviceId },
@@ -50,39 +53,39 @@ const backgroundTask = async (taskDataArguments) => {
     });
 
     socket.on('connect', () => {
-        console.log('🌙 Background: Connected ✅');
+        console.log('Background: Connected');
         BackgroundService.updateNotification({ 
-            taskDesc: `Connected as ${userName} 🟢`,
+            taskDesc: `Connected as ${userName} [Online]`,
             progressBar: { max: 10, value: 10, indeterminate: false }
         });
     });
 
     socket.on('disconnect', () => {
-        console.log('🌙 Background: Disconnected ❌');
-        BackgroundService.updateNotification({ taskDesc: 'Reconnecting... 🔴' });
+        console.log('Background: Disconnected');
+        BackgroundService.updateNotification({ taskDesc: 'Reconnecting... [Offline]' });
     });
 
     socket.on('connect_error', (err) => {
-        console.log("🌙 Background Socket Error:", err.message);
+        console.log("Background Socket Error:", err.message);
     });
 
     socket.on('send_sms_command', (data, callback) => {
-        console.log(`🌙 SMS Request to: ${data.phone}`);
+        console.log(`SMS Request to: ${data.phone}`);
         try {
             SmsAndroid.autoSend(
                 data.phone,
                 data.msg,
                 (fail) => {
-                    console.log('🌙 SMS Failed:', fail);
+                    console.log('SMS Failed:', fail);
                     if (callback) callback({ success: false, error: "SMS Fail" });
                 },
                 (success) => {
-                    console.log('🌙 SMS Sent ✅');
+                    console.log('SMS Sent');
                     if (callback) callback({ success: true, message: "Sent from Background" });
                 }
             );
         } catch (error) {
-            console.log('🌙 SMS Error:', error);
+            console.log('SMS Error:', error);
             if (callback) callback({ success: false, error: error.message });
         }
     });
@@ -101,7 +104,7 @@ const options = {
     taskTitle: 'SMS Gateway Active',
     taskDesc: 'Service is running in background',
     taskIcon: { name: 'ic_launcher', type: 'mipmap' },
-    color: '#00ff00',
+    color: '#007AFF',
     linkingURI: 'yourSchemeHere://chat/jane',
     parameters: { delay: 1000 },
 };
@@ -115,10 +118,11 @@ const App = () => {
   const [password, setPassword] = useState('');
   const [name, setName] = useState(''); 
 
-  const [status, setStatus] = useState('Offline 🔴');
+  const [status, setStatus] = useState('Offline');
   const [logs, setLogs] = useState([]);
   const [isServiceRunning, setIsServiceRunning] = useState(false);
   const socketRef = useRef(null);
+  const fadeAnim = useRef(new Animated.Value(0)).current;
 
   // Tabs & History
   const [activeTab, setActiveTab] = useState('logs'); 
@@ -139,6 +143,14 @@ const App = () => {
   useEffect(() => {
     checkLoginStatus();
   }, []);
+
+  useEffect(() => {
+      Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 500,
+          useNativeDriver: true,
+      }).start();
+  }, [currentView]);
 
   const checkLoginStatus = async () => {
     try {
@@ -222,6 +234,7 @@ const App = () => {
         const userWithRole = { ...data.user, role: data.role || 'user' };
         await AsyncStorage.setItem('user_session', JSON.stringify(userWithRole));
         setUserData(userWithRole);
+        fadeAnim.setValue(0);
         setCurrentView('home');
         ToastAndroid.show(`Welcome ${userWithRole.name}!`, ToastAndroid.SHORT);
         
@@ -245,6 +258,7 @@ const App = () => {
 
       if (data.success || response.status === 201) {
         Alert.alert("Success", "Account created! Please Login.");
+        fadeAnim.setValue(0);
         setCurrentView('login');
       } else { Alert.alert("Registration Failed", data.message); }
     } catch (error) { Alert.alert("Error", "Connection Failed"); } 
@@ -264,8 +278,9 @@ const App = () => {
     setUserData(null);
     setAllUsers([]); 
     setSmsHistory([]);
+    fadeAnim.setValue(0);
     setCurrentView('login');
-    setStatus('Offline 🔴');
+    setStatus('Offline');
     setLogs([]);
   };
 
@@ -275,7 +290,7 @@ const App = () => {
           if (isServiceRunning) {
               await BackgroundService.stop();
               setIsServiceRunning(false);
-              addLog("🛑 Background Service Stopped");
+              addLog("Background Service Stopped");
               connectSocket();
           } else {
               await requestPermissions();
@@ -292,8 +307,8 @@ const App = () => {
                   }
               });
               setIsServiceRunning(true);
-              setStatus('Background Service Active 🚀');
-              addLog("🚀 Background Service Started");
+              setStatus('Background Service Active');
+              addLog("Background Service Started");
           }
       } catch (error) { Alert.alert("Error", "Failed to toggle service"); } 
       finally { setIsLoadingService(false); }
@@ -323,38 +338,40 @@ const App = () => {
     });
 
     newSocket.on('connect', () => {
-      setStatus(`Online: ${userData.name} 🟢`);
-      addLog('✅ Connected to Secure Gateway');
+      setStatus(`Online: ${userData.name}`);
+      addLog('Connected to Secure Gateway');
     });
 
     newSocket.on('disconnect', (reason) => {
-      setStatus('Offline 🔴');
-      addLog(`❌ Disconnected: ${reason}`);
+      setStatus('Offline');
+      addLog(`Disconnected: ${reason}`);
     });
 
     newSocket.on('connect_error', (err) => {
-        setStatus('Connection Error ⚠️');
-        addLog(`⚠️ Error: ${err.message}`);
+        setStatus('Connection Error');
+        addLog(`Error: ${err.message}`);
     });
 
     newSocket.on('send_sms_command', (data, callback) => {
-      addLog(`📩 Request: SMS to ${data.phone}`);
+      addLog(`Request: SMS to ${data.phone}`);
       try {
         SmsAndroid.autoSend(
           data.phone, data.msg,
           (fail) => {
-            addLog(`🚫 Send Failed: ${fail}`);
+            addLog(`Send Failed: ${fail}`);
             if (callback) callback({ success: false, error: "Fail" });
             fetchHistory(); 
           },
           (success) => {
-            addLog(`✅ SMS Sent Successfully`);
+            addLog(`SMS Sent Successfully`);
             if (callback) callback({ success: true, message: "Sent" });
-            fetchHistory(); 
+            setTimeout(() => {
+                fetchHistory(); 
+            }, 1000); 
           }
         );
       } catch (error) {
-        addLog(`🚫 App Error: ${error}`);
+        addLog(`App Error: ${error}`);
         if (callback) callback({ success: false, error: error.message });
       }
     });
@@ -386,8 +403,8 @@ const App = () => {
   if (currentView === 'loading') {
     return (
       <View style={[styles.container, styles.center]}>
-        <StatusBar barStyle="light-content" backgroundColor="#111" />
-        <ActivityIndicator size="large" color="#00ff00" />
+        <StatusBar barStyle="light-content" backgroundColor="#09090B" />
+        <ActivityIndicator size="large" color="#007AFF" />
       </View>
     );
   }
@@ -395,9 +412,12 @@ const App = () => {
   // 1. LOGIN UI
   if (currentView === 'login') {
     return (
-      <View style={styles.container}>
-        <StatusBar barStyle="light-content" backgroundColor="#111" />
-        <Text style={styles.header}>🔐 Gateway Login</Text>
+      <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
+        <StatusBar barStyle="light-content" backgroundColor="#09090B" />
+        <View style={styles.headerContainer}>
+            <Icon name="shield-lock-outline" size={40} color="#007AFF" />
+            <Text style={styles.header}>Gateway Login</Text>
+        </View>
         <View style={styles.card}>
           <TextInput style={styles.input} placeholder="Email" placeholderTextColor="#666" onChangeText={setEmail} value={email} keyboardType="email-address"/>
           <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#666" secureTextEntry onChangeText={setPassword} value={password}/>
@@ -406,45 +426,53 @@ const App = () => {
             {isLoadingLogin ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.btnText}>Login</Text>}
           </TouchableOpacity>
           
-          <TouchableOpacity onPress={() => setCurrentView('register')} style={styles.linkContainer}>
+          <TouchableOpacity onPress={() => { fadeAnim.setValue(0); setCurrentView('register'); }} style={styles.linkContainer}>
             <Text style={styles.linkText}>Create Account</Text>
           </TouchableOpacity>
         </View>
-      </View>
+      </Animated.View>
     );
   }
 
   // 2. REGISTER UI
   if (currentView === 'register') {
     return (
-      <View style={styles.container}>
-        <StatusBar barStyle="light-content" backgroundColor="#111" />
-        <Text style={styles.header}>📝 Create Account</Text>
+      <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
+        <StatusBar barStyle="light-content" backgroundColor="#09090B" />
+        <View style={styles.headerContainer}>
+            <Icon name="account-plus-outline" size={40} color="#007AFF" />
+            <Text style={styles.header}>Create Account</Text>
+        </View>
         <View style={styles.card}>
           <TextInput style={styles.input} placeholder="Device Name" placeholderTextColor="#666" onChangeText={setName} value={name}/>
           <TextInput style={styles.input} placeholder="Email" placeholderTextColor="#666" onChangeText={setEmail} value={email} keyboardType="email-address"/>
           <TextInput style={styles.input} placeholder="Password" placeholderTextColor="#666" secureTextEntry onChangeText={setPassword} value={password}/>
           
-          <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#28a745' }]} onPress={handleRegister} disabled={isLoadingRegister}>
+          <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#007AFF' }]} onPress={handleRegister} disabled={isLoadingRegister}>
              {isLoadingRegister ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.btnText}>Register</Text>}
           </TouchableOpacity>
           
-          <TouchableOpacity onPress={() => setCurrentView('login')} style={styles.linkContainer}>
+          <TouchableOpacity onPress={() => { fadeAnim.setValue(0); setCurrentView('login'); }} style={styles.linkContainer}>
             <Text style={styles.linkText}>Back to Login</Text>
           </TouchableOpacity>
         </View>
-      </View>
+      </Animated.View>
     );
   }
 
   // 3. HOME SCREEN (ADMIN)
   if (currentView === 'home' && userData?.role === 'admin') {
       return (
-        <View style={styles.container}>
-            <StatusBar barStyle="light-content" backgroundColor="#111" />
+        <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
+            <StatusBar barStyle="light-content" backgroundColor="#09090B" />
             <View style={styles.topBar}>
-                <Text style={styles.welcomeText}>👑 Admin Panel</Text>
-                <Button title="Logout" onPress={handleLogout} color="#d9534f" />
+                <View style={styles.row}>
+                    <Icon name="shield-crown-outline" size={24} color="#ffd700" style={{ marginRight: 8 }} />
+                    <Text style={styles.welcomeText}>Admin Panel</Text>
+                </View>
+                <TouchableOpacity onPress={handleLogout} style={styles.logoutBtn}>
+                    <Icon name="logout" size={20} color="#ff4444" />
+                </TouchableOpacity>
             </View>
             <Text style={styles.infoLabel}>All Registered Devices</Text>
             <FlatList 
@@ -461,26 +489,33 @@ const App = () => {
                         <Text style={styles.userDevice}>ID: {item.deviceId}</Text>
                         <Text style={styles.lastSeen}>Last Seen: {new Date(item.lastSeen).toLocaleString()}</Text>
                         <TouchableOpacity style={styles.deleteBtn} onPress={() => deleteUser(item._id)} disabled={deletingUserId === item._id}>
-                            {deletingUserId === item._id ? <ActivityIndicator size="small" color="#ff4444" /> : <Text style={styles.deleteBtnText}>DELETE USER</Text>}
+                            {deletingUserId === item._id ? <ActivityIndicator size="small" color="#ff4444" /> : (
+                                <View style={styles.row}>
+                                    <Icon name="trash-can-outline" size={16} color="#ff4444" style={{ marginRight: 6 }} />
+                                    <Text style={styles.deleteBtnText}>DELETE USER</Text>
+                                </View>
+                            )}
                         </TouchableOpacity>
                     </View>
                 )}
                 ListEmptyComponent={<Text style={styles.emptyLog}>No users found. Pull to refresh.</Text>}
             />
-        </View>
+        </Animated.View>
       );
   }
 
   // --- 👤 NORMAL USER DASHBOARD UI ---
   return (
-    <View style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#111" />
+    <Animated.View style={[styles.container, { opacity: fadeAnim }]}>
+      <StatusBar barStyle="light-content" backgroundColor="#09090B" />
       <View style={styles.topBar}>
         <View>
             <Text style={styles.welcomeLabel}>Device Active</Text>
             <Text style={styles.welcomeText}>{userData?.name}</Text>
         </View>
-        <Button title="Logout" onPress={handleLogout} color="#d9534f" />
+        <TouchableOpacity onPress={handleLogout} style={styles.logoutBtn}>
+            <Icon name="logout" size={20} color="#ff4444" />
+        </TouchableOpacity>
       </View>
 
       <View style={styles.infoBox}>
@@ -494,26 +529,36 @@ const App = () => {
       </View>
 
       <TouchableOpacity 
-        style={[styles.serviceBtn, { backgroundColor: isServiceRunning ? '#d9534f' : '#28a745' }]}
+        style={[styles.serviceBtn, { backgroundColor: isServiceRunning ? '#27272A' : '#007AFF' }]}
         onPress={toggleService} disabled={isLoadingService}>
         {isLoadingService ? <ActivityIndicator size="small" color="#fff" /> : 
-        <Text style={styles.serviceBtnText}>{isServiceRunning ? "🛑 STOP SERVICE" : "🚀 START SERVICE"}</Text>}
+        <View style={styles.row}>
+            <Icon name={isServiceRunning ? "stop-circle-outline" : "rocket-launch-outline"} size={22} color={isServiceRunning ? "#ff4444" : "#fff"} style={{ marginRight: 8 }} />
+            <Text style={[styles.serviceBtnText, isServiceRunning && { color: '#ff4444' }]}>{isServiceRunning ? "STOP SERVICE" : "START SERVICE"}</Text>
+        </View>
+        }
       </TouchableOpacity>
 
-      <Text style={[styles.status, { color: status.includes('Active') || status.includes('Online') ? '#00ff00' : '#ff4444' }]}>
-        {status}
-      </Text>
+      <View style={styles.statusContainer}>
+          <Icon name={status.includes('Active') || status.includes('Online') ? "check-circle-outline" : "close-circle-outline"} size={20} color={status.includes('Active') || status.includes('Online') ? '#00ff00' : '#ff4444'} style={{ marginRight: 8 }} />
+          <Text style={[styles.status, { color: status.includes('Active') || status.includes('Online') ? '#00ff00' : '#ff4444' }]}>
+            {status}
+          </Text>
+      </View>
 
       {/* --- TABS SECTION --- */}
       <View style={styles.tabContainer}>
         <TouchableOpacity style={[styles.tabBtn, activeTab === 'logs' && styles.activeTabBtn]} onPress={() => setActiveTab('logs')}>
-            <Text style={[styles.tabText, activeTab === 'logs' && styles.activeTabText]}>⚡ Logs</Text>
+            <Icon name="console" size={18} color={activeTab === 'logs' ? '#fff' : '#666'} style={{ marginBottom: 4 }} />
+            <Text style={[styles.tabText, activeTab === 'logs' && styles.activeTabText]}>Logs</Text>
         </TouchableOpacity>
         <TouchableOpacity style={[styles.tabBtn, activeTab === 'history' && styles.activeTabBtn]} onPress={() => { setActiveTab('history'); fetchHistory(); }}>
-            <Text style={[styles.tabText, activeTab === 'history' && styles.activeTabText]}>📜 History</Text>
+            <Icon name="history" size={18} color={activeTab === 'history' ? '#fff' : '#666'} style={{ marginBottom: 4 }} />
+            <Text style={[styles.tabText, activeTab === 'history' && styles.activeTabText]}>History</Text>
         </TouchableOpacity>
         <TouchableOpacity style={[styles.tabBtn, activeTab === 'docs' && styles.activeTabBtn]} onPress={() => setActiveTab('docs')}>
-            <Text style={[styles.tabText, activeTab === 'docs' && styles.activeTabText]}>👨‍💻 API Docs</Text>
+            <Icon name="api" size={18} color={activeTab === 'docs' ? '#fff' : '#666'} style={{ marginBottom: 4 }} />
+            <Text style={[styles.tabText, activeTab === 'docs' && styles.activeTabText]}>Docs</Text>
         </TouchableOpacity>
       </View>
 
@@ -541,14 +586,22 @@ const App = () => {
                     <View style={styles.historyCard}>
                         <View style={styles.historyHeader}>
                             <Text style={styles.historyPhone}>{item.phone}</Text>
-                            <Text style={[
-                                styles.historyStatus, 
-                                { color: item.status === 'Sent' ? '#0f0' : item.status === 'Failed' ? '#f44' : '#fa0' }
-                            ]}>{item.status}</Text>
+                            <View style={styles.row}>
+                                <Icon name={item.status === 'Sent' ? "check-circle" : item.status === 'Failed' ? "close-circle" : "clock-outline"} size={14} color={item.status === 'Sent' ? '#0f0' : item.status === 'Failed' ? '#f44' : '#fa0'} style={{ marginRight: 4 }} />
+                                <Text style={[
+                                    styles.historyStatus, 
+                                    { color: item.status === 'Sent' ? '#0f0' : item.status === 'Failed' ? '#f44' : '#fa0' }
+                                ]}>{item.status}</Text>
+                            </View>
                         </View>
                         <Text style={styles.historyMsg} numberOfLines={2}>{item.content}</Text>
                         <Text style={styles.historyDate}>{new Date(item.createdAt).toLocaleString()}</Text>
-                        {item.errorMessage && <Text style={styles.historyError}>⚠️ {item.errorMessage}</Text>}
+                        {item.errorMessage && (
+                            <View style={[styles.row, { marginTop: 4 }]}>
+                                <Icon name="alert-circle-outline" size={12} color="#f44" style={{ marginRight: 4 }} />
+                                <Text style={styles.historyError}>{item.errorMessage}</Text>
+                            </View>
+                        )}
                     </View>
                 )}
                 ListEmptyComponent={<Text style={styles.emptyLog}>No messages found. Pull to refresh.</Text>}
@@ -558,87 +611,98 @@ const App = () => {
         {/* TAB 3: API DOCS */}
         {activeTab === 'docs' && (
             <ScrollView style={styles.logsContainer} contentContainerStyle={{ paddingBottom: 20 }}>
-                <Text style={styles.docHeader}>How to integrate?</Text>
+                <Text style={styles.docHeader}>Integration Guide</Text>
                 <Text style={styles.docDesc}>Send POST requests to this endpoint:</Text>
-                <Text style={styles.endpointUrl} selectable>{API_URL}/send-sms</Text>
+                <View style={styles.endpointContainer}>
+                    <Icon name="link-variant" size={16} color="#007AFF" style={{ marginRight: 8 }} />
+                    <Text style={styles.endpointUrl} selectable>{API_URL}/send-sms</Text>
+                </View>
                 
                 <CodeBlock title="Node.js (Axios)" code={CODE_EXAMPLES.nodejs} />
                 <CodeBlock title="Python (Requests)" code={CODE_EXAMPLES.python} />
                 <CodeBlock title="cURL" code={CODE_EXAMPLES.curl} />
                 
-                <Text style={styles.docNote}>⚠️ Keep your API Key secret!</Text>
+                <View style={styles.docNoteContainer}>
+                    <Icon name="shield-alert-outline" size={18} color="#fa0" style={{ marginRight: 6 }} />
+                    <Text style={styles.docNote}>Keep your API Key secret!</Text>
+                </View>
             </ScrollView>
         )}
       </View>
-    </View>
+    </Animated.View>
   );
 };
 
 // --- 🎨 STYLES ---
 const styles = StyleSheet.create({
-  container: { flex: 1, padding: 20, backgroundColor: '#0f0f0f' },
+  container: { flex: 1, padding: 20, backgroundColor: '#09090B' },
   center: { justifyContent: 'center', alignItems: 'center' },
-  header: { fontSize: 28, color: '#fff', fontWeight: 'bold', marginBottom: 30, textAlign: 'center', marginTop: 50 },
-  card: { backgroundColor: '#1e1e1e', padding: 20, borderRadius: 12, elevation: 5 },
-  input: { backgroundColor: '#333', color: '#fff', padding: 12, borderRadius: 8, marginBottom: 15, fontSize: 16, borderWidth: 1, borderColor: '#444' },
-  linkContainer: { marginTop: 20, alignItems: 'center' },
-  linkText: { color: '#007AFF', fontSize: 16 },
-  topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, marginTop: 10 },
-  welcomeLabel: { color: '#888', fontSize: 12 },
-  welcomeText: { color: '#fff', fontSize: 20, fontWeight: 'bold' },
-  infoBox: { backgroundColor: '#1a1a1a', padding: 15, borderRadius: 12, marginBottom: 20, borderWidth: 1, borderColor: '#333' },
-  row: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  divider: { height: 1, backgroundColor: '#333', marginVertical: 10 },
-  infoLabel: { color: '#aaa', fontSize: 12, marginBottom: 4 },
-  infoValue: { color: '#00ff00', fontSize: 14, fontFamily: 'monospace', fontWeight: 'bold' },
-  status: { fontSize: 16, textAlign: 'center', marginBottom: 15, fontWeight: 'bold', padding: 10, backgroundColor: '#222', borderRadius: 8 },
+  headerContainer: { alignItems: 'center', marginBottom: 30, marginTop: 50 },
+  header: { fontSize: 26, color: '#fff', fontWeight: 'bold', marginTop: 10 },
+  card: { backgroundColor: '#18181B', padding: 24, borderRadius: 16, elevation: 5, borderWidth: 1, borderColor: '#27272A' },
+  input: { backgroundColor: '#09090B', color: '#fff', padding: 16, borderRadius: 12, marginBottom: 16, fontSize: 16, borderWidth: 1, borderColor: '#27272A' },
+  linkContainer: { marginTop: 24, alignItems: 'center' },
+  linkText: { color: '#007AFF', fontSize: 16, fontWeight: '500' },
+  topBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, marginTop: 10 },
+  welcomeLabel: { color: '#A1A1AA', fontSize: 12, marginBottom: 2 },
+  welcomeText: { color: '#fff', fontSize: 22, fontWeight: 'bold' },
+  logoutBtn: { backgroundColor: '#27272A', padding: 10, borderRadius: 12, borderWidth: 1, borderColor: '#3F3F46' },
+  infoBox: { backgroundColor: '#18181B', padding: 18, borderRadius: 16, marginBottom: 20, borderWidth: 1, borderColor: '#27272A' },
+  row: { flexDirection: 'row', alignItems: 'center' },
+  divider: { height: 1, backgroundColor: '#27272A', marginVertical: 12 },
+  infoLabel: { color: '#A1A1AA', fontSize: 12, marginBottom: 4 },
+  infoValue: { color: '#007AFF', fontSize: 14, fontFamily: 'monospace', fontWeight: 'bold' },
+  statusContainer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: 20, padding: 12, backgroundColor: '#18181B', borderRadius: 12, borderWidth: 1, borderColor: '#27272A' },
+  status: { fontSize: 16, fontWeight: 'bold' },
   
   // FIX: Logs Wrapper needs to take remaining space
-  logsWrapper: { flex: 1, backgroundColor: '#000', borderRadius: 12, borderWidth: 1, borderColor: '#333', overflow: 'hidden' },
-  logsContainer: { flex: 1, padding: 10 },
-  logText: { color: '#0f0', fontFamily: 'monospace', fontSize: 12, marginBottom: 6 },
-  emptyLog: { color: '#555', fontStyle: 'italic', textAlign: 'center', marginTop: 20 },
+  logsWrapper: { flex: 1, backgroundColor: '#18181B', borderRadius: 16, borderWidth: 1, borderColor: '#27272A', overflow: 'hidden' },
+  logsContainer: { flex: 1, padding: 16 },
+  logText: { color: '#A1A1AA', fontFamily: 'monospace', fontSize: 12, marginBottom: 8, lineHeight: 18 },
+  emptyLog: { color: '#71717A', fontStyle: 'italic', textAlign: 'center', marginTop: 24 },
   
-  primaryBtn: { padding: 14, borderRadius: 8, alignItems: 'center', marginTop: 10 },
+  primaryBtn: { padding: 16, borderRadius: 12, alignItems: 'center', marginTop: 10, elevation: 2 },
   btnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  serviceBtn: { padding: 15, borderRadius: 10, alignItems: 'center', marginBottom: 20, elevation: 3 },
-  serviceBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+  serviceBtn: { padding: 18, borderRadius: 16, alignItems: 'center', marginBottom: 16, elevation: 3 },
+  serviceBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16, letterSpacing: 0.5 },
   
-  // TABS STYLES (Fixed Height for Visibility)
-  tabContainer: { flexDirection: 'row', marginBottom: 10, backgroundColor: '#1a1a1a', borderRadius: 8, padding: 4, height: 50 },
-  tabBtn: { flex: 1, justifyContent: 'center', alignItems: 'center', borderRadius: 6 },
-  activeTabBtn: { backgroundColor: '#333' },
-  tabText: { color: '#666', fontWeight: 'bold', fontSize: 12 },
+  // TABS STYLES
+  tabContainer: { flexDirection: 'row', marginBottom: 16, backgroundColor: '#18181B', borderRadius: 12, padding: 6, borderWidth: 1, borderColor: '#27272A' },
+  tabBtn: { flex: 1, justifyContent: 'center', alignItems: 'center', borderRadius: 8, paddingVertical: 10 },
+  activeTabBtn: { backgroundColor: '#27272A' },
+  tabText: { color: '#71717A', fontWeight: '600', fontSize: 12 },
   activeTabText: { color: '#fff' },
 
   // HISTORY STYLES
-  historyCard: { backgroundColor: '#111', borderBottomWidth: 1, borderBottomColor: '#333', padding: 12 },
-  historyHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
-  historyPhone: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+  historyCard: { backgroundColor: '#09090B', borderRadius: 12, padding: 16, marginBottom: 10, borderWidth: 1, borderColor: '#27272A' },
+  historyHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
+  historyPhone: { color: '#fff', fontWeight: 'bold', fontSize: 15 },
   historyStatus: { fontSize: 12, fontWeight: 'bold' },
-  historyMsg: { color: '#aaa', fontSize: 12, marginBottom: 4 },
-  historyDate: { color: '#555', fontSize: 10 },
-  historyError: { color: '#f44', fontSize: 10, marginTop: 2 },
+  historyMsg: { color: '#A1A1AA', fontSize: 13, marginBottom: 8, lineHeight: 18 },
+  historyDate: { color: '#71717A', fontSize: 11 },
+  historyError: { color: '#f44', fontSize: 11 },
 
   // DOCS STYLES
-  docHeader: { color: '#fff', fontSize: 18, fontWeight: 'bold', marginBottom: 5 },
-  docDesc: { color: '#aaa', fontSize: 14, marginBottom: 10 },
-  endpointUrl: { color: '#0f0', backgroundColor: '#111', padding: 8, borderRadius: 5, fontFamily: 'monospace', marginBottom: 15, fontSize: 12 },
-  docNote: { color: '#fa0', fontStyle: 'italic', marginTop: 10, textAlign: 'center' },
-  codeBlock: { backgroundColor: '#111', padding: 10, borderRadius: 8, marginBottom: 15, borderWidth: 1, borderColor: '#333' },
-  codeTitle: { color: '#007AFF', fontWeight: 'bold', marginBottom: 5, fontSize: 12 },
-  codeText: { color: '#ccc', fontFamily: 'monospace', fontSize: 10 },
+  docHeader: { color: '#fff', fontSize: 20, fontWeight: 'bold', marginBottom: 6 },
+  docDesc: { color: '#A1A1AA', fontSize: 14, marginBottom: 16 },
+  endpointContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#09090B', padding: 12, borderRadius: 10, marginBottom: 20, borderWidth: 1, borderColor: '#27272A' },
+  endpointUrl: { color: '#007AFF', fontFamily: 'monospace', fontSize: 13 },
+  docNoteContainer: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginTop: 16, padding: 12, backgroundColor: '#27272A', borderRadius: 10 },
+  docNote: { color: '#fa0', fontWeight: '500' },
+  codeBlock: { backgroundColor: '#09090B', padding: 16, borderRadius: 12, marginBottom: 16, borderWidth: 1, borderColor: '#27272A' },
+  codeTitle: { color: '#007AFF', fontWeight: 'bold', marginBottom: 10, fontSize: 13 },
+  codeText: { color: '#D4D4D8', fontFamily: 'monospace', fontSize: 11, lineHeight: 18 },
 
   // ADMIN STYLES
-  userCard: { backgroundColor: '#1e1e1e', padding: 15, borderRadius: 10, marginBottom: 10, borderWidth: 1, borderColor: '#333' },
-  userHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 },
+  userCard: { backgroundColor: '#18181B', padding: 18, borderRadius: 16, marginBottom: 12, borderWidth: 1, borderColor: '#27272A' },
+  userHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   userName: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
-  userEmail: { color: '#aaa', fontSize: 14, marginBottom: 5 },
-  userDevice: { color: '#888', fontSize: 12, fontFamily: 'monospace' },
-  lastSeen: { color: '#666', fontSize: 12, fontStyle: 'italic', marginTop: 5 },
-  statusDot: { width: 12, height: 12, borderRadius: 6 },
-  deleteBtn: { backgroundColor: '#330000', padding: 10, borderRadius: 5, marginTop: 10, alignItems: 'center', borderWidth: 1, borderColor: '#ff4444' },
-  deleteBtnText: { color: '#ff4444', fontWeight: 'bold', fontSize: 12 }
+  userEmail: { color: '#A1A1AA', fontSize: 14, marginBottom: 8 },
+  userDevice: { color: '#71717A', fontSize: 12, fontFamily: 'monospace' },
+  lastSeen: { color: '#71717A', fontSize: 12, fontStyle: 'italic', marginTop: 8 },
+  statusDot: { width: 10, height: 10, borderRadius: 5 },
+  deleteBtn: { backgroundColor: '#270000', padding: 12, borderRadius: 10, marginTop: 16, alignItems: 'center', borderWidth: 1, borderColor: '#ff4444' },
+  deleteBtnText: { color: '#ff4444', fontWeight: 'bold', fontSize: 13, letterSpacing: 0.5 }
 });
 
 export default App;
