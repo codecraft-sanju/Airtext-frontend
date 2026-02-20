@@ -69,7 +69,7 @@ const backgroundTask = async (taskDataArguments) => {
         console.log("Background Socket Error:", err.message);
     });
 
-    socket.on('send_sms_command', (data, callback) => {
+    socket.on('send_sms_command', async (data, callback) => {
         console.log(`SMS Request to: ${data.phone}`);
         try {
             SmsAndroid.autoSend(
@@ -84,6 +84,18 @@ const backgroundTask = async (taskDataArguments) => {
                     if (callback) callback({ success: true, message: "Sent from Background" });
                 }
             );
+
+            // Background Notification Cooldown Timer
+            for(let i = 20; i > 0; i--) {
+                if (!BackgroundService.isRunning()) break;
+                await BackgroundService.updateNotification({ taskDesc: `Cooldown: ${i}s wait...` });
+                await sleep(1000);
+            }
+            
+            if (BackgroundService.isRunning()) {
+                await BackgroundService.updateNotification({ taskDesc: `Connected as ${userName} [Online]` });
+            }
+
         } catch (error) {
             console.log('SMS Error:', error);
             if (callback) callback({ success: false, error: error.message });
@@ -119,6 +131,7 @@ const App = () => {
   const [name, setName] = useState(''); 
 
   const [status, setStatus] = useState('Offline');
+  const [cooldown, setCooldown] = useState(0); // ⏳ New Cooldown State
   const [logs, setLogs] = useState([]);
   const [isServiceRunning, setIsServiceRunning] = useState(false);
   const socketRef = useRef(null);
@@ -151,6 +164,17 @@ const App = () => {
           useNativeDriver: true,
       }).start();
   }, [currentView]);
+
+  // --- ⏳ COOLDOWN TIMER EFFECT ---
+  useEffect(() => {
+      let timer;
+      if (cooldown > 0) {
+          timer = setInterval(() => {
+              setCooldown(prev => prev - 1);
+          }, 1000);
+      }
+      return () => clearInterval(timer);
+  }, [cooldown]);
 
   const checkLoginStatus = async () => {
     try {
@@ -278,6 +302,7 @@ const App = () => {
     setUserData(null);
     setAllUsers([]); 
     setSmsHistory([]);
+    setCooldown(0);
     fadeAnim.setValue(0);
     setCurrentView('login');
     setStatus('Offline');
@@ -354,6 +379,7 @@ const App = () => {
 
     newSocket.on('send_sms_command', (data, callback) => {
       addLog(`Request: SMS to ${data.phone}`);
+      setCooldown(20); // ⏳ Start 20s cooldown on UI
       try {
         SmsAndroid.autoSend(
           data.phone, data.msg,
@@ -540,10 +566,21 @@ const App = () => {
       </TouchableOpacity>
 
       <View style={styles.statusContainer}>
-          <Icon name={status.includes('Active') || status.includes('Online') ? "check-circle-outline" : "close-circle-outline"} size={20} color={status.includes('Active') || status.includes('Online') ? '#00ff00' : '#ff4444'} style={{ marginRight: 8 }} />
-          <Text style={[styles.status, { color: status.includes('Active') || status.includes('Online') ? '#00ff00' : '#ff4444' }]}>
-            {status}
-          </Text>
+          {cooldown > 0 ? (
+              <>
+                  <Icon name="timer-sand" size={20} color="#fa0" style={{ marginRight: 8 }} />
+                  <Text style={[styles.status, { color: '#fa0' }]}>
+                      Cooldown: {cooldown}s...
+                  </Text>
+              </>
+          ) : (
+              <>
+                  <Icon name={status.includes('Active') || status.includes('Online') ? "check-circle-outline" : "close-circle-outline"} size={20} color={status.includes('Active') || status.includes('Online') ? '#00ff00' : '#ff4444'} style={{ marginRight: 8 }} />
+                  <Text style={[styles.status, { color: status.includes('Active') || status.includes('Online') ? '#00ff00' : '#ff4444' }]}>
+                    {status}
+                  </Text>
+              </>
+          )}
       </View>
 
       {/* --- TABS SECTION --- */}
