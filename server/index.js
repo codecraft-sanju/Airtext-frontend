@@ -9,6 +9,18 @@ const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
+const qrcode = require('qrcode');
+const pino = require('pino');
+
+// --- 🟢 BAILEYS IMPORTS ---
+const { 
+    default: makeWASocket, 
+    DisconnectReason, 
+    initAuthCreds, 
+    BufferJSON, 
+    proto, 
+    Browsers 
+} = require('@whiskeysockets/baileys');
 
 // --- 🌍 CONFIGURATION ---
 const PORT = process.env.PORT || 3000;
@@ -22,6 +34,9 @@ const ADMIN_PASS = "admin";
 
 const app = express();
 const server = http.createServer(app);
+
+// --- 🛡️ PROXY FIX FOR RATE LIMIT ON RENDER ---
+app.set('trust proxy', 1);
 
 // --- 🛡️ SECURITY MIDDLEWARE ---
 app.use(helmet()); 
@@ -68,31 +83,97 @@ const UserSchema = new mongoose.Schema({
     password: { type: String, required: true },
     apiKey: { type: String, unique: true },
     deviceId: { type: String, unique: true },
-    lastSeen: { type: Date, default: Date.now }
+    lastSeen: { type: Date, default: Date.now },
+    waStatus: { type: String, default: 'Disconnected' },
+    waQr: { type: String, default: null }
 });
-
 const User = mongoose.model('User', UserSchema);
 
-// 2. MESSAGE SCHEMA (🆕 NEW ADDITION)
+// 2. MESSAGE SCHEMA
 const MessageSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     phone: { type: String, required: true },
     content: { type: String, required: true },
-    status: { type: String, enum: ['Pending', 'Processing', 'Sent', 'Failed'], default: 'Pending' },
+    type: { type: String, enum: ['sms', 'whatsapp', 'both'], default: 'sms' },
+    status: { type: String, enum: ['Pending', 'Processing', 'Sent', 'Failed', 'Partial'], default: 'Pending' },
     errorMessage: { type: String }, 
     webhookUrl: { type: String },
     createdAt: { type: Date, default: Date.now }
 });
-
 const Message = mongoose.model('Message', MessageSchema);
+
+// 3. WHATSAPP AUTH SCHEMA (New for Baileys Session Management)
+const WaAuthSchema = new mongoose.Schema({
+    userId: { type: String, required: true },
+    key: { type: String, required: true },
+    value: { type: String, required: true }
+});
+WaAuthSchema.index({ userId: 1, key: 1 }, { unique: true });
+const WaAuth = mongoose.model('WaAuth', WaAuthSchema);
 
 const deviceSocketMap = new Map(); 
 const deviceUserMap = new Map();
 const deviceCooldowns = new Map();
+const waSockets = new Map();
+
+// --- 🟢 MONGODB AUTH ADAPTER FOR BAILEYS ---
+const useMongoDBAuthState = async (userId) => {
+    const writeData = async (data, key) => {
+        const value = JSON.stringify(data, BufferJSON.replacer);
+        await WaAuth.findOneAndUpdate(
+            { userId, key },
+            { value },
+            { upsert: true, new: true }
+        );
+    };
+
+    const readData = async (key) => {
+        const doc = await WaAuth.findOne({ userId, key });
+        if (doc) return JSON.parse(doc.value, BufferJSON.reviver);
+        return null;
+    };
+
+    const removeData = async (key) => {
+        await WaAuth.deleteOne({ userId, key });
+    };
+
+    let creds = await readData('creds') || initAuthCreds();
+
+    return {
+        state: {
+            creds,
+            keys: {
+                get: async (type, ids) => {
+                    const data = {};
+                    await Promise.all(ids.map(async id => {
+                        let value = await readData(`${type}-${id}`);
+                        if (type === 'app-state-sync-key' && value) {
+                            value = proto.Message.AppStateSyncKeyData.fromObject(value);
+                        }
+                        data[id] = value;
+                    }));
+                    return data;
+                },
+                set: async (data) => {
+                    const tasks = [];
+                    for (const category in data) {
+                        for (const id in data[category]) {
+                            const value = data[category][id];
+                            const key = `${category}-${id}`;
+                            tasks.push(value ? writeData(value, key) : removeData(key));
+                        }
+                    }
+                    await Promise.all(tasks);
+                }
+            }
+        },
+        saveCreds: () => writeData(creds, 'creds')
+    };
+};
 
 // --- 🏠 BASIC ROUTE ---
 app.get('/', (req, res) => {
-    res.send(`<h1>SMS Gateway Server Running 🚀</h1>`);
+    res.send(`<h1>Gateway Server Running 🚀 (Baileys Engine)</h1>`);
 });
 
 // --- 🔐 AUTH ROUTES ---
@@ -123,7 +204,6 @@ app.post('/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
 
-        // --- 👑 ADMIN LOGIN CHECK ---
         if (email === ADMIN_EMAIL && password === ADMIN_PASS) {
             return res.json({
                 success: true,
@@ -155,8 +235,6 @@ app.post('/auth/login', async (req, res) => {
 });
 
 // --- 👑 ADMIN ROUTES ---
-
-// 1. Get All Users (With Online Status)
 app.get('/admin/users', async (req, res) => {
     try {
         const users = await User.find({}).sort({ lastSeen: -1 }); 
@@ -170,7 +248,8 @@ app.get('/admin/users', async (req, res) => {
                 deviceId: user.deviceId,
                 apiKey: user.apiKey,
                 lastSeen: user.lastSeen,
-                isOnline: isOnline 
+                isOnline: isOnline,
+                waStatus: user.waStatus
             };
         });
 
@@ -180,7 +259,6 @@ app.get('/admin/users', async (req, res) => {
     }
 });
 
-// 2. Delete User
 app.delete('/admin/user/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -194,6 +272,14 @@ app.delete('/admin/user/:id', async (req, res) => {
                 deviceUserMap.delete(deletedUser.deviceId);
                 deviceCooldowns.delete(deletedUser.deviceId);
             }
+            if (waSockets.has(id)) {
+                const sock = waSockets.get(id);
+                sock.logout();
+                waSockets.delete(id);
+            }
+            // Clear WhatsApp Auth data for deleted user
+            await WaAuth.deleteMany({ userId: id });
+            
             res.json({ success: true, message: "User Deleted Successfully" });
         } else {
             res.status(404).json({ success: false, message: "User not found" });
@@ -203,7 +289,7 @@ app.delete('/admin/user/:id', async (req, res) => {
     }
 });
 
-// --- 📜 GET MESSAGE HISTORY (🆕 NEW ROUTE) ---
+// --- 📜 GET MESSAGE HISTORY ---
 app.get('/user/messages', async (req, res) => {
     try {
         const { apiKey } = req.query; 
@@ -218,6 +304,85 @@ app.get('/user/messages', async (req, res) => {
 
         res.json({ success: true, messages });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- 🟢 BAILEYS INITIALIZATION LOGIC ---
+async function startBaileysConnection(userIdStr, userDoc) {
+    console.log(`[WA DEBUG] ⏳ Starting Baileys for user: ${userDoc.email}`);
+    
+    const { state, saveCreds } = await useMongoDBAuthState(userIdStr);
+
+    const sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: false,
+        browser: Browsers.macOS('Desktop'),
+        logger: pino({ level: 'silent' }), // Hides extra logs
+        syncFullHistory: false // Saves RAM
+    });
+
+    waSockets.set(userIdStr, sock);
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+            console.log(`[WA DEBUG] 🟩 QR Code Generated for ${userDoc.email}`);
+            try {
+                const qrDataURL = await qrcode.toDataURL(qr);
+                await User.findByIdAndUpdate(userIdStr, { waQr: qrDataURL, waStatus: 'QR_Ready' });
+            } catch (error) {
+                console.error("[WA DEBUG] ❌ QR Generation Error:", error);
+            }
+        }
+
+        if (connection === 'close') {
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+            
+            console.log(`[WA DEBUG] 🔌 Connection closed. Reconnecting: ${shouldReconnect}`);
+            
+            if (shouldReconnect) {
+                // Wait briefly before reconnecting
+                setTimeout(() => startBaileysConnection(userIdStr, userDoc), 5000);
+            } else {
+                console.log(`[WA DEBUG] 🚪 User Logged out: ${userDoc.email}`);
+                await User.findByIdAndUpdate(userIdStr, { waQr: null, waStatus: 'Disconnected' });
+                await WaAuth.deleteMany({ userId: userIdStr });
+                waSockets.delete(userIdStr);
+            }
+        } else if (connection === 'open') {
+            console.log(`[WA DEBUG] ✅ WhatsApp Ready for User: ${userDoc.email}`);
+            await User.findByIdAndUpdate(userIdStr, { waQr: null, waStatus: 'Connected' });
+        }
+    });
+}
+
+// --- 🌐 WHATSAPP START ROUTE ---
+app.get('/whatsapp/start', async (req, res) => {
+    try {
+        const { apiKey } = req.query;
+        if (!apiKey) return res.status(400).json({ success: false, message: "API Key required" });
+
+        const user = await User.findOne({ apiKey });
+        if (!user) return res.status(401).json({ success: false, message: "Invalid API Key" });
+
+        const userIdStr = user._id.toString();
+
+        // 🚨 YAHAN FIX KIYA HAI: Naya QR mangne par doosra socket nahi banayega agar purana QR de raha hai.
+        if (waSockets.has(userIdStr)) {
+            return res.json({ success: true, message: "Client exists", status: user.waStatus, qr: user.waQr });
+        }
+
+        // Initialize connection
+        await startBaileysConnection(userIdStr, user);
+
+        res.json({ success: true, message: "WhatsApp initialization started via Baileys" });
+    } catch (err) {
+        console.error("[WA DEBUG] API Error in /whatsapp/start:", err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -248,13 +413,17 @@ io.on('connection', async (socket) => {
     });
 });
 
-// --- 🚀 SEND SMS API (UPDATED WITH LOGS) ---
-app.post('/send-sms', async (req, res) => {
+// --- 🚀 SEND SMS API ---
+app.post('/send-message', async (req, res) => {
     try {
-        const { apiKey, phone, msg, webhookUrl } = req.body;
+        const { apiKey, phone, msg, webhookUrl, type = 'sms' } = req.body;
 
         if(!apiKey || !phone || !msg) 
             return res.status(400).json({ success: false, message: "Missing parameters" });
+
+        if (!['sms', 'whatsapp', 'both'].includes(type)) {
+            return res.status(400).json({ success: false, message: "Invalid type. Use sms, whatsapp, or both" });
+        }
         
         const user = await User.findOne({ apiKey });
         if (!user) return res.status(401).json({ success: false, message: "Invalid API Key" });
@@ -263,6 +432,7 @@ app.post('/send-sms', async (req, res) => {
             userId: user._id,
             phone,
             content: msg,
+            type,
             status: 'Pending',
             webhookUrl: webhookUrl || null
         });
@@ -271,7 +441,7 @@ app.post('/send-sms', async (req, res) => {
         res.status(202).json({ success: true, message: "Message Queued", messageId: newMessage._id });
 
     } catch (err) {
-        console.error("SMS API Error:", err);
+        console.error("API Error:", err);
         if (!res.headersSent) {
             res.status(500).json({ error: err.message });
         }
@@ -279,69 +449,123 @@ app.post('/send-sms', async (req, res) => {
 });
 
 async function processQueue() {
-    for (const [deviceId, socketId] of deviceSocketMap.entries()) {
-        const cooldown = deviceCooldowns.get(deviceId) || 0;
-        if (Date.now() < cooldown) continue; 
+    const pendingMessages = await Message.find({ status: 'Pending' }).sort({ createdAt: 1 }).limit(10);
 
-        const userId = deviceUserMap.get(deviceId);
-        if (!userId) continue;
+    for (const msg of pendingMessages) {
+        const user = await User.findById(msg.userId);
+        if (!user) continue;
 
-        const msg = await Message.findOneAndUpdate(
-            { userId: userId, status: 'Pending' },
-            { status: 'Processing' },
-            { sort: { createdAt: 1 }, new: true }
-        );
+        msg.status = 'Processing';
+        await msg.save();
 
-        if (!msg) continue; 
+        let smsResult = { sent: false, error: null };
+        let waResult = { sent: false, error: null };
+        let requiresCooldown = false;
 
-        deviceCooldowns.set(deviceId, Date.now() + 20000);
-
-        let responseHandled = false;
-
-        const handleCompletion = async (status, errorMessage) => {
-            if (responseHandled) return;
-            responseHandled = true;
-
-            msg.status = status;
-            if (errorMessage) msg.errorMessage = errorMessage;
-            await msg.save();
-
-            if (msg.webhookUrl) {
+        // 🟢 BAILEYS MESSAGE SENDING LOGIC
+        if (msg.type === 'whatsapp' || msg.type === 'both') {
+            const sock = waSockets.get(user._id.toString());
+            if (sock && user.waStatus === 'Connected') {
                 try {
-                    await fetch(msg.webhookUrl, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            messageId: msg._id,
-                            phone: msg.phone,
-                            status: msg.status,
-                            errorMessage: msg.errorMessage
-                        })
-                    });
-                } catch (webhookError) {
-                    console.error("Webhook Error:", webhookError.message);
+                    let formattedPhone = msg.phone.replace(/[^0-9]/g, '');
+                    // Baileys needs '@s.whatsapp.net' for individuals
+                    if (!formattedPhone.endsWith('@s.whatsapp.net')) {
+                        formattedPhone += '@s.whatsapp.net';
+                    }
+                    
+                    await sock.sendMessage(formattedPhone, { text: msg.content });
+                    waResult.sent = true;
+                } catch (err) {
+                    waResult.error = err.message;
                 }
+            } else {
+                waResult.error = 'WhatsApp not connected';
             }
-        };
+        }
 
-        const timeout = setTimeout(() => {
-            handleCompletion('Failed', 'Device Timeout (No response from app)');
-        }, 15000);
+        if (msg.type === 'sms' || msg.type === 'both') {
+            const deviceId = user.deviceId;
+            const socketId = deviceSocketMap.get(deviceId);
+            const cooldown = deviceCooldowns.get(deviceId) || 0;
 
-        const targetSocket = io.sockets.sockets.get(socketId);
-        
-        if (targetSocket) {
-            targetSocket.emit('send_sms_command', { phone: msg.phone, msg: msg.content, id: msg._id }, (response) => {
-                clearTimeout(timeout);
-                if (response && response.success) {
-                    handleCompletion('Sent', null);
-                } else {
-                    handleCompletion('Failed', response ? response.error : "App reported failure");
+            if (socketId) {
+                if (Date.now() < cooldown) {
+                    msg.status = 'Pending';
+                    await msg.save();
+                    continue; 
                 }
-            });
-        } else {
-            clearTimeout(timeout);
-            handleCompletion('Failed', 'Device Disconnected before sending');
+
+                requiresCooldown = true;
+                const targetSocket = io.sockets.sockets.get(socketId);
+                
+                if (targetSocket) {
+                    try {
+                        const response = await new Promise((resolve, reject) => {
+                            const timeout = setTimeout(() => reject(new Error('Device Timeout')), 15000);
+                            targetSocket.emit('send_sms_command', { phone: msg.phone, msg: msg.content, id: msg._id }, (res) => {
+                                clearTimeout(timeout);
+                                resolve(res);
+                            });
+                        });
+                        
+                        if (response && response.success) {
+                            smsResult.sent = true;
+                        } else {
+                            smsResult.error = response ? response.error : "App reported failure";
+                        }
+                    } catch (err) {
+                        smsResult.error = err.message;
+                    }
+                } else {
+                    smsResult.error = 'Device Disconnected before sending';
+                }
+            } else {
+                smsResult.error = 'Device Offline';
+            }
+        }
+
+        if (requiresCooldown) {
+            deviceCooldowns.set(user.deviceId, Date.now() + 20000);
+        }
+
+        let finalStatus = 'Failed';
+        let errorMessages = [];
+
+        if (msg.type === 'whatsapp') {
+            finalStatus = waResult.sent ? 'Sent' : 'Failed';
+            if (waResult.error) errorMessages.push(`WA: ${waResult.error}`);
+        } else if (msg.type === 'sms') {
+            finalStatus = smsResult.sent ? 'Sent' : 'Failed';
+            if (smsResult.error) errorMessages.push(`SMS: ${smsResult.error}`);
+        } else if (msg.type === 'both') {
+            if (smsResult.sent && waResult.sent) finalStatus = 'Sent';
+            else if (smsResult.sent || waResult.sent) finalStatus = 'Partial';
+            else finalStatus = 'Failed';
+
+            if (smsResult.error) errorMessages.push(`SMS: ${smsResult.error}`);
+            if (waResult.error) errorMessages.push(`WA: ${waResult.error}`);
+        }
+
+        msg.status = finalStatus;
+        if (errorMessages.length > 0) msg.errorMessage = errorMessages.join(' | ');
+        await msg.save();
+
+        if (msg.webhookUrl) {
+            try {
+                await fetch(msg.webhookUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        messageId: msg._id,
+                        phone: msg.phone,
+                        type: msg.type,
+                        status: msg.status,
+                        errorMessage: msg.errorMessage
+                    })
+                });
+            } catch (webhookError) {
+                console.error("Webhook Error:", webhookError.message);
+            }
         }
     }
 }

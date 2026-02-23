@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { 
     View, Text, TextInput, Button, StyleSheet, 
     PermissionsAndroid, ScrollView, Alert, ActivityIndicator, 
-    TouchableOpacity, ToastAndroid, StatusBar, Platform, FlatList, RefreshControl, Animated
+    TouchableOpacity, ToastAndroid, StatusBar, Platform, FlatList, RefreshControl, Animated, Image
 } from 'react-native';
 import io from 'socket.io-client';
 import SmsAndroid from 'react-native-get-sms-android';
@@ -16,25 +16,27 @@ const API_URL = 'https://airtext-fo6q.onrender.com';
 const CODE_EXAMPLES = {
     nodejs: `const axios = require('axios');
 
-await axios.post('${API_URL}/send-sms', {
+await axios.post('${API_URL}/send-message', {
     apiKey: 'YOUR_API_KEY',
     phone: '+919876543210',
     msg: 'Hello from Node.js!',
+    type: 'whatsapp', // 'sms', 'whatsapp', or 'both'
     webhookUrl: 'https://your-site.com/webhook'
 });`,
     python: `import requests
 
-url = "${API_URL}/send-sms"
+url = "${API_URL}/send-message"
 data = {
     "apiKey": "YOUR_API_KEY",
     "phone": "+919876543210",
     "msg": "Hello from Python!",
+    "type": "both",
     "webhookUrl": "https://your-site.com/webhook"
 }
 requests.post(url, json=data)`,
-    curl: `curl -X POST ${API_URL}/send-sms \\
+    curl: `curl -X POST ${API_URL}/send-message \\
 -H "Content-Type: application/json" \\
--d '{"apiKey": "KEY", "phone": "NUMBER", "msg": "TEXT", "webhookUrl": "https://your-site.com/webhook"}'`
+-d '{"apiKey": "KEY", "phone": "NUMBER", "msg": "TEXT", "type": "sms", "webhookUrl": "https://your-site.com/webhook"}'`
 };
 
 // --- 🌙 BACKGROUND TASK LOGIC ---
@@ -85,7 +87,6 @@ const backgroundTask = async (taskDataArguments) => {
                 }
             );
 
-            // Background Notification Cooldown Timer
             for(let i = 20; i > 0; i--) {
                 if (!BackgroundService.isRunning()) break;
                 await BackgroundService.updateNotification({ taskDesc: `Cooldown: ${i}s wait...` });
@@ -131,7 +132,7 @@ const App = () => {
   const [name, setName] = useState(''); 
 
   const [status, setStatus] = useState('Offline');
-  const [cooldown, setCooldown] = useState(0); // ⏳ New Cooldown State
+  const [cooldown, setCooldown] = useState(0); 
   const [logs, setLogs] = useState([]);
   const [isServiceRunning, setIsServiceRunning] = useState(false);
   const socketRef = useRef(null);
@@ -141,6 +142,11 @@ const App = () => {
   const [activeTab, setActiveTab] = useState('logs'); 
   const [smsHistory, setSmsHistory] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+
+  // WhatsApp States
+  const [waStatus, setWaStatus] = useState('Disconnected');
+  const [waQr, setWaQr] = useState(null);
+  const [isWaLoading, setIsWaLoading] = useState(false);
 
   // Admin Data
   const [allUsers, setAllUsers] = useState([]);
@@ -165,7 +171,6 @@ const App = () => {
       }).start();
   }, [currentView]);
 
-  // --- ⏳ COOLDOWN TIMER EFFECT ---
   useEffect(() => {
       let timer;
       if (cooldown > 0) {
@@ -175,6 +180,41 @@ const App = () => {
       }
       return () => clearInterval(timer);
   }, [cooldown]);
+
+  // WhatsApp QR Polling
+  useEffect(() => {
+      let waInterval;
+      if (activeTab === 'whatsapp' && waStatus !== 'Connected' && userData?.apiKey) {
+          fetchWaStatus(); 
+          waInterval = setInterval(fetchWaStatus, 3000);
+      }
+      return () => clearInterval(waInterval);
+  }, [activeTab, waStatus, userData]);
+
+  const fetchWaStatus = async () => {
+      try {
+          const response = await fetch(`${API_URL}/whatsapp/start?apiKey=${userData.apiKey}`);
+          const data = await response.json();
+          if (data.success) {
+              if (data.status) setWaStatus(data.status);
+              if (data.qr) {
+                  setWaQr(data.qr);
+                  setIsWaLoading(false);
+              }
+              if (data.status === 'Connected' || data.status === 'Disconnected') {
+                  setIsWaLoading(false);
+              }
+          }
+      } catch (error) {
+          console.log("WA Polling Error", error);
+          setIsWaLoading(false);
+      }
+  };
+
+  const initWhatsApp = async () => {
+      setIsWaLoading(true);
+      await fetchWaStatus();
+  };
 
   const checkLoginStatus = async () => {
     try {
@@ -303,6 +343,8 @@ const App = () => {
     setAllUsers([]); 
     setSmsHistory([]);
     setCooldown(0);
+    setWaStatus('Disconnected');
+    setWaQr(null);
     fadeAnim.setValue(0);
     setCurrentView('login');
     setStatus('Offline');
@@ -379,7 +421,7 @@ const App = () => {
 
     newSocket.on('send_sms_command', (data, callback) => {
       addLog(`Request: SMS to ${data.phone}`);
-      setCooldown(20); // ⏳ Start 20s cooldown on UI
+      setCooldown(20); 
       try {
         SmsAndroid.autoSend(
           data.phone, data.msg,
@@ -513,6 +555,7 @@ const App = () => {
                         </View>
                         <Text style={styles.userEmail}>{item.email}</Text>
                         <Text style={styles.userDevice}>ID: {item.deviceId}</Text>
+                        <Text style={styles.userDevice}>WA Status: {item.waStatus || 'Disconnected'}</Text>
                         <Text style={styles.lastSeen}>Last Seen: {new Date(item.lastSeen).toLocaleString()}</Text>
                         <TouchableOpacity style={styles.deleteBtn} onPress={() => deleteUser(item._id)} disabled={deletingUserId === item._id}>
                             {deletingUserId === item._id ? <ActivityIndicator size="small" color="#ff4444" /> : (
@@ -560,7 +603,7 @@ const App = () => {
         {isLoadingService ? <ActivityIndicator size="small" color="#fff" /> : 
         <View style={styles.row}>
             <Icon name={isServiceRunning ? "stop-circle-outline" : "rocket-launch-outline"} size={22} color={isServiceRunning ? "#ff4444" : "#fff"} style={{ marginRight: 8 }} />
-            <Text style={[styles.serviceBtnText, isServiceRunning && { color: '#ff4444' }]}>{isServiceRunning ? "STOP SERVICE" : "START SERVICE"}</Text>
+            <Text style={[styles.serviceBtnText, isServiceRunning && { color: '#ff4444' }]}>{isServiceRunning ? "STOP SMS SERVICE" : "START SMS SERVICE"}</Text>
         </View>
         }
       </TouchableOpacity>
@@ -589,6 +632,10 @@ const App = () => {
             <Icon name="console" size={18} color={activeTab === 'logs' ? '#fff' : '#666'} style={{ marginBottom: 4 }} />
             <Text style={[styles.tabText, activeTab === 'logs' && styles.activeTabText]}>Logs</Text>
         </TouchableOpacity>
+        <TouchableOpacity style={[styles.tabBtn, activeTab === 'whatsapp' && styles.activeTabBtn]} onPress={() => setActiveTab('whatsapp')}>
+            <Icon name="whatsapp" size={18} color={activeTab === 'whatsapp' ? '#25D366' : '#666'} style={{ marginBottom: 4 }} />
+            <Text style={[styles.tabText, activeTab === 'whatsapp' && styles.activeTabText]}>WhatsApp</Text>
+        </TouchableOpacity>
         <TouchableOpacity style={[styles.tabBtn, activeTab === 'history' && styles.activeTabBtn]} onPress={() => { setActiveTab('history'); fetchHistory(); }}>
             <Icon name="history" size={18} color={activeTab === 'history' ? '#fff' : '#666'} style={{ marginBottom: 4 }} />
             <Text style={[styles.tabText, activeTab === 'history' && styles.activeTabText]}>History</Text>
@@ -612,7 +659,41 @@ const App = () => {
             </ScrollView>
         )}
 
-        {/* TAB 2: HISTORY */}
+        {/* TAB 2: WHATSAPP */}
+        {activeTab === 'whatsapp' && (
+            <View style={styles.waContainer}>
+                <Icon name="whatsapp" size={48} color="#25D366" style={{ marginBottom: 16 }} />
+                <Text style={styles.waHeader}>WhatsApp Web Integration</Text>
+                
+                {waStatus === 'Connected' ? (
+                    <View style={styles.waCard}>
+                        <Icon name="check-decagram" size={40} color="#00ff00" style={{ marginBottom: 10 }} />
+                        <Text style={styles.waConnectedText}>WhatsApp is Linked!</Text>
+                        <Text style={styles.waDesc}>You can now send WhatsApp messages via the API using type: "whatsapp" or "both".</Text>
+                        <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#27272A', marginTop: 20 }]} onPress={initWhatsApp}>
+                            <Text style={styles.btnText}>Check Status</Text>
+                        </TouchableOpacity>
+                    </View>
+                ) : waStatus === 'QR_Ready' && waQr ? (
+                    <View style={styles.waCard}>
+                        <Text style={styles.waDesc}>Scan this QR code using WhatsApp on your phone (Linked Devices).</Text>
+                        <View style={styles.qrWrapper}>
+                            <Image source={{ uri: waQr }} style={styles.qrImage} resizeMode="contain" />
+                        </View>
+                        <Text style={styles.waNote}>QR refreshes automatically. Please wait if it fails.</Text>
+                    </View>
+                ) : (
+                    <View style={styles.waCard}>
+                        <Text style={styles.waDesc}>Connect your WhatsApp account to enable background messaging.</Text>
+                        <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#25D366', marginTop: 20 }]} onPress={initWhatsApp} disabled={isWaLoading}>
+                            {isWaLoading ? <ActivityIndicator size="small" color="#fff" /> : <Text style={[styles.btnText, { color: '#000' }]}>Generate QR Code</Text>}
+                        </TouchableOpacity>
+                    </View>
+                )}
+            </View>
+        )}
+
+        {/* TAB 3: HISTORY */}
         {activeTab === 'history' && (
             <FlatList 
                 data={smsHistory}
@@ -624,12 +705,16 @@ const App = () => {
                         <View style={styles.historyHeader}>
                             <Text style={styles.historyPhone}>{item.phone}</Text>
                             <View style={styles.row}>
-                                <Icon name={item.status === 'Sent' ? "check-circle" : item.status === 'Failed' ? "close-circle" : "clock-outline"} size={14} color={item.status === 'Sent' ? '#0f0' : item.status === 'Failed' ? '#f44' : '#fa0'} style={{ marginRight: 4 }} />
+                                <Icon name={item.status === 'Sent' ? "check-circle" : item.status === 'Failed' ? "close-circle" : item.status === 'Partial' ? "alert-circle" : "clock-outline"} size={14} color={item.status === 'Sent' ? '#0f0' : item.status === 'Failed' ? '#f44' : '#fa0'} style={{ marginRight: 4 }} />
                                 <Text style={[
                                     styles.historyStatus, 
                                     { color: item.status === 'Sent' ? '#0f0' : item.status === 'Failed' ? '#f44' : '#fa0' }
                                 ]}>{item.status}</Text>
                             </View>
+                        </View>
+                        <View style={styles.row}>
+                            <Icon name={item.type === 'whatsapp' ? 'whatsapp' : item.type === 'both' ? 'call-split' : 'message-text'} size={12} color="#007AFF" style={{ marginRight: 4, marginBottom: 8 }} />
+                            <Text style={styles.historyType}>{item.type ? item.type.toUpperCase() : 'SMS'}</Text>
                         </View>
                         <Text style={styles.historyMsg} numberOfLines={2}>{item.content}</Text>
                         <Text style={styles.historyDate}>{new Date(item.createdAt).toLocaleString()}</Text>
@@ -645,14 +730,14 @@ const App = () => {
             />
         )}
 
-        {/* TAB 3: API DOCS */}
+        {/* TAB 4: API DOCS */}
         {activeTab === 'docs' && (
             <ScrollView style={styles.logsContainer} contentContainerStyle={{ paddingBottom: 20 }}>
                 <Text style={styles.docHeader}>Integration Guide</Text>
-                <Text style={styles.docDesc}>Send POST requests to this endpoint:</Text>
+                <Text style={styles.docDesc}>Send POST requests to this endpoint. You can now specify "sms", "whatsapp", or "both" in the type field.</Text>
                 <View style={styles.endpointContainer}>
                     <Icon name="link-variant" size={16} color="#007AFF" style={{ marginRight: 8 }} />
-                    <Text style={styles.endpointUrl} selectable>{API_URL}/send-sms</Text>
+                    <Text style={styles.endpointUrl} selectable>{API_URL}/send-message</Text>
                 </View>
                 
                 <CodeBlock title="Node.js (Axios)" code={CODE_EXAMPLES.nodejs} />
@@ -692,13 +777,12 @@ const styles = StyleSheet.create({
   statusContainer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', marginBottom: 20, padding: 12, backgroundColor: '#18181B', borderRadius: 12, borderWidth: 1, borderColor: '#27272A' },
   status: { fontSize: 16, fontWeight: 'bold' },
   
-  // FIX: Logs Wrapper needs to take remaining space
   logsWrapper: { flex: 1, backgroundColor: '#18181B', borderRadius: 16, borderWidth: 1, borderColor: '#27272A', overflow: 'hidden' },
   logsContainer: { flex: 1, padding: 16 },
   logText: { color: '#A1A1AA', fontFamily: 'monospace', fontSize: 12, marginBottom: 8, lineHeight: 18 },
   emptyLog: { color: '#71717A', fontStyle: 'italic', textAlign: 'center', marginTop: 24 },
   
-  primaryBtn: { padding: 16, borderRadius: 12, alignItems: 'center', marginTop: 10, elevation: 2 },
+  primaryBtn: { padding: 16, borderRadius: 12, alignItems: 'center', marginTop: 10, elevation: 2, width: '100%' },
   btnText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
   serviceBtn: { padding: 18, borderRadius: 16, alignItems: 'center', marginBottom: 16, elevation: 3 },
   serviceBtnText: { color: '#fff', fontWeight: 'bold', fontSize: 16, letterSpacing: 0.5 },
@@ -710,18 +794,29 @@ const styles = StyleSheet.create({
   tabText: { color: '#71717A', fontWeight: '600', fontSize: 12 },
   activeTabText: { color: '#fff' },
 
+  // WHATSAPP STYLES
+  waContainer: { flex: 1, padding: 20, alignItems: 'center', justifyContent: 'center' },
+  waHeader: { color: '#fff', fontSize: 20, fontWeight: 'bold', marginBottom: 20 },
+  waCard: { backgroundColor: '#09090B', padding: 24, borderRadius: 16, alignItems: 'center', borderWidth: 1, borderColor: '#27272A', width: '100%' },
+  waDesc: { color: '#A1A1AA', fontSize: 14, textAlign: 'center', lineHeight: 22, marginBottom: 16 },
+  waConnectedText: { color: '#00ff00', fontSize: 18, fontWeight: 'bold', marginBottom: 8 },
+  qrWrapper: { backgroundColor: '#fff', padding: 10, borderRadius: 12, marginBottom: 16 },
+  qrImage: { width: 200, height: 200 },
+  waNote: { color: '#fa0', fontSize: 12, textAlign: 'center' },
+
   // HISTORY STYLES
   historyCard: { backgroundColor: '#09090B', borderRadius: 12, padding: 16, marginBottom: 10, borderWidth: 1, borderColor: '#27272A' },
-  historyHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
+  historyHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
   historyPhone: { color: '#fff', fontWeight: 'bold', fontSize: 15 },
   historyStatus: { fontSize: 12, fontWeight: 'bold' },
+  historyType: { color: '#007AFF', fontSize: 11, fontWeight: 'bold', marginBottom: 8 },
   historyMsg: { color: '#A1A1AA', fontSize: 13, marginBottom: 8, lineHeight: 18 },
   historyDate: { color: '#71717A', fontSize: 11 },
   historyError: { color: '#f44', fontSize: 11 },
 
   // DOCS STYLES
   docHeader: { color: '#fff', fontSize: 20, fontWeight: 'bold', marginBottom: 6 },
-  docDesc: { color: '#A1A1AA', fontSize: 14, marginBottom: 16 },
+  docDesc: { color: '#A1A1AA', fontSize: 14, marginBottom: 16, lineHeight: 20 },
   endpointContainer: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#09090B', padding: 12, borderRadius: 10, marginBottom: 20, borderWidth: 1, borderColor: '#27272A' },
   endpointUrl: { color: '#007AFF', fontFamily: 'monospace', fontSize: 13 },
   docNoteContainer: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', marginTop: 16, padding: 12, backgroundColor: '#27272A', borderRadius: 10 },
