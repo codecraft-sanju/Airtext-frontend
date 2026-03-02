@@ -10,7 +10,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import BackgroundService from 'react-native-background-actions';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 
-const API_URL = 'https://airtext-fo6q.onrender.com';
+const API_URL = 'http://13.233.83.235:3000';
 
 // --- 📋 DEVELOPER CODE EXAMPLES ---
 const CODE_EXAMPLES = {
