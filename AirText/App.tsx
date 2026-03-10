@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { 
-    View, Text, TextInput, Button, StyleSheet, 
+    View, Text, TextInput, StyleSheet, 
     PermissionsAndroid, ScrollView, Alert, ActivityIndicator, 
     TouchableOpacity, ToastAndroid, StatusBar, Platform, FlatList, RefreshControl, Animated, Image
 } from 'react-native';
@@ -87,12 +87,7 @@ const backgroundTask = async (taskDataArguments) => {
                 }
             );
 
-            for(let i = 20; i > 0; i--) {
-                if (!BackgroundService.isRunning()) break;
-                await BackgroundService.updateNotification({ taskDesc: `Cooldown: ${i}s wait...` });
-                await sleep(1000);
-            }
-            
+            // Fast execution: Updates notification instantly without blocking the next SMS
             if (BackgroundService.isRunning()) {
                 await BackgroundService.updateNotification({ taskDesc: `Connected as ${userName} [Online]` });
             }
@@ -421,7 +416,7 @@ const App = () => {
 
     newSocket.on('send_sms_command', (data, callback) => {
       addLog(`Request: SMS to ${data.phone}`);
-      setCooldown(20); 
+      
       try {
         SmsAndroid.autoSend(
           data.phone, data.msg,
