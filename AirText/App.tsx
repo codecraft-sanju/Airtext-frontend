@@ -10,9 +10,17 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import BackgroundService from 'react-native-background-actions';
 import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
 
+// --- NEW CHANGES: Image Picker import ---
+import { launchImageLibrary } from 'react-native-image-picker';
+
 const API_URL = 'http://13.233.83.235:3000';
 
+// --- NEW CHANGES: Cloudinary Constants ---
+const CLOUDINARY_UPLOAD_URL = "https://api.cloudinary.com/v1_1/dvoenforj/image/upload";
+const UPLOAD_PRESET = "salon_preset";
+
 // --- 📋 DEVELOPER CODE EXAMPLES ---
+// --- NEW CHANGES: Updated examples to include mediaUrls array ---
 const CODE_EXAMPLES = {
     nodejs: `const axios = require('axios');
 
@@ -21,6 +29,7 @@ await axios.post('${API_URL}/send-message', {
     phone: '+919876543210',
     msg: 'Hello from Node.js!',
     type: 'whatsapp', // 'sms', 'whatsapp', or 'both'
+    mediaUrls: ['https://res.cloudinary.com/.../image.jpg'], // Optional: Max 10 images for WhatsApp
     webhookUrl: 'https://your-site.com/webhook'
 });`,
     python: `import requests
@@ -31,12 +40,13 @@ data = {
     "phone": "+919876543210",
     "msg": "Hello from Python!",
     "type": "both",
+    "mediaUrls": ["https://res.cloudinary.com/.../image.jpg"],
     "webhookUrl": "https://your-site.com/webhook"
 }
 requests.post(url, json=data)`,
     curl: `curl -X POST ${API_URL}/send-message \\
 -H "Content-Type: application/json" \\
--d '{"apiKey": "KEY", "phone": "NUMBER", "msg": "TEXT", "type": "sms", "webhookUrl": "https://your-site.com/webhook"}'`
+-d '{"apiKey": "KEY", "phone": "NUMBER", "msg": "TEXT", "type": "whatsapp", "mediaUrls": ["https://url.jpg"]}'`
 };
 
 // --- 🌙 BACKGROUND TASK LOGIC ---
@@ -134,6 +144,7 @@ const App = () => {
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
   // Tabs & History
+  // --- NEW CHANGES: Added 'send' to tabs ---
   const [activeTab, setActiveTab] = useState('logs'); 
   const [smsHistory, setSmsHistory] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -152,6 +163,104 @@ const App = () => {
   const [isLoadingRegister, setIsLoadingRegister] = useState(false);
   const [isLoadingService, setIsLoadingService] = useState(false);
   const [deletingUserId, setDeletingUserId] = useState(null); 
+
+  // --- NEW CHANGES: Compose Message States ---
+  const [sendPhone, setSendPhone] = useState('');
+  const [sendMsg, setSendMsg] = useState('');
+  const [sendType, setSendType] = useState('whatsapp');
+  const [selectedImages, setSelectedImages] = useState([]);
+  const [isSendingMsg, setIsSendingMsg] = useState(false);
+
+  // --- NEW CHANGES: Image selection logic ---
+  const pickImages = () => {
+      const remainingSlots = 10 - selectedImages.length;
+      if (remainingSlots <= 0) {
+          Alert.alert("Limit Reached", "You can only select up to 10 photos.");
+          return;
+      }
+
+      launchImageLibrary({ selectionLimit: remainingSlots, mediaType: 'photo' }, (response) => {
+          if (response.didCancel || response.errorCode) return;
+          if (response.assets) {
+              setSelectedImages(prev => [...prev, ...response.assets].slice(0, 10));
+          }
+      });
+  };
+
+  const removeImage = (index) => {
+      setSelectedImages(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const uploadToCloudinary = async (image) => {
+      const data = new FormData();
+      data.append('file', {
+          uri: image.uri,
+          type: image.type || 'image/jpeg',
+          name: image.fileName || `photo_${Date.now()}.jpg`
+      });
+      data.append('upload_preset', UPLOAD_PRESET);
+
+      try {
+          const res = await fetch(CLOUDINARY_UPLOAD_URL, {
+              method: 'POST',
+              body: data,
+              headers: { 'Content-Type': 'multipart/form-data' }
+          });
+          const result = await res.json();
+          return result.secure_url;
+      } catch (err) {
+          console.error("Cloudinary Error", err);
+          return null;
+      }
+  };
+
+  const handleSendMessage = async () => {
+      if (!sendPhone || !sendMsg) return Alert.alert("Error", "Phone number and message are required.");
+      setIsSendingMsg(true);
+
+      try {
+          let uploadedUrls = [];
+          
+          if ((sendType === 'whatsapp' || sendType === 'both') && selectedImages.length > 0) {
+              ToastAndroid.show("Uploading photos...", ToastAndroid.SHORT);
+              for (let img of selectedImages) {
+                  const url = await uploadToCloudinary(img);
+                  if (url) uploadedUrls.push(url);
+              }
+          }
+
+          const payload = {
+              apiKey: userData.apiKey,
+              phone: sendPhone,
+              msg: sendMsg,
+              type: sendType,
+              mediaUrls: uploadedUrls 
+          };
+
+          const response = await fetch(`${API_URL}/send-message`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+          });
+
+          const data = await response.json();
+          if (data.success) {
+              Alert.alert("Sent", "Message sent to gateway queue successfully.");
+              setSendPhone('');
+              setSendMsg('');
+              setSelectedImages([]);
+              setActiveTab('history');
+              fetchHistory();
+          } else {
+              Alert.alert("Failed", data.message || "Failed to send message.");
+          }
+      } catch (error) {
+          Alert.alert("Error", "Something went wrong.");
+      } finally {
+          setIsSendingMsg(false);
+      }
+  };
+  // --- END NEW CHANGES ---
 
   // --- 🔄 APP STARTUP ---
   useEffect(() => {
@@ -623,6 +732,11 @@ const App = () => {
 
       {/* --- TABS SECTION --- */}
       <View style={styles.tabContainer}>
+        {/* --- NEW CHANGES: Send Tab added --- */}
+        <TouchableOpacity style={[styles.tabBtn, activeTab === 'send' && styles.activeTabBtn]} onPress={() => setActiveTab('send')}>
+            <Icon name="send" size={18} color={activeTab === 'send' ? '#fff' : '#666'} style={{ marginBottom: 4 }} />
+            <Text style={[styles.tabText, activeTab === 'send' && styles.activeTabText]}>Send</Text>
+        </TouchableOpacity>
         <TouchableOpacity style={[styles.tabBtn, activeTab === 'logs' && styles.activeTabBtn]} onPress={() => setActiveTab('logs')}>
             <Icon name="console" size={18} color={activeTab === 'logs' ? '#fff' : '#666'} style={{ marginBottom: 4 }} />
             <Text style={[styles.tabText, activeTab === 'logs' && styles.activeTabText]}>Logs</Text>
@@ -643,6 +757,59 @@ const App = () => {
 
       {/* --- CONTENT SECTION --- */}
       <View style={styles.logsWrapper}>
+
+        {/* --- NEW CHANGES: SEND TAB CONTENT --- */}
+        {activeTab === 'send' && (
+            <ScrollView style={styles.logsContainer} contentContainerStyle={{ paddingBottom: 20 }}>
+                <Text style={styles.docHeader}>Compose Message</Text>
+                
+                <TextInput style={styles.input} placeholder="Phone Number (e.g. +919876543210)" placeholderTextColor="#666" value={sendPhone} onChangeText={setSendPhone} keyboardType="phone-pad" />
+                <TextInput style={[styles.input, { height: 100, textAlignVertical: 'top' }]} placeholder="Your message text..." placeholderTextColor="#666" value={sendMsg} onChangeText={setSendMsg} multiline />
+
+                <View style={[styles.row, { justifyContent: 'space-around', marginBottom: 16 }]}>
+                    <TouchableOpacity style={[styles.typeBtn, sendType === 'sms' && styles.typeBtnActive]} onPress={() => setSendType('sms')}>
+                        <Text style={[styles.typeBtnText, sendType === 'sms' && styles.typeBtnTextActive]}>SMS</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[styles.typeBtn, sendType === 'whatsapp' && styles.typeBtnActive]} onPress={() => setSendType('whatsapp')}>
+                        <Text style={[styles.typeBtnText, sendType === 'whatsapp' && styles.typeBtnTextActive]}>WhatsApp</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[styles.typeBtn, sendType === 'both' && styles.typeBtnActive]} onPress={() => setSendType('both')}>
+                        <Text style={[styles.typeBtnText, sendType === 'both' && styles.typeBtnTextActive]}>Both</Text>
+                    </TouchableOpacity>
+                </View>
+
+                {/* Show Image Picker only if WhatsApp is selected in some way */}
+                {(sendType === 'whatsapp' || sendType === 'both') && (
+                    <View style={styles.imagePickerContainer}>
+                        <View style={[styles.row, { justifyContent: 'space-between', marginBottom: 10 }]}>
+                            <Text style={styles.infoLabel}>Attach Photos (WhatsApp Only)</Text>
+                            <Text style={styles.infoLabel}>{selectedImages.length}/10</Text>
+                        </View>
+                        <TouchableOpacity style={styles.pickImageBtn} onPress={pickImages}>
+                            <Icon name="camera-plus" size={20} color="#007AFF" style={{ marginRight: 8 }} />
+                            <Text style={styles.linkText}>Select Photos</Text>
+                        </TouchableOpacity>
+
+                        <View style={styles.imagePreviewRow}>
+                            {selectedImages.map((img, index) => (
+                                <View key={index} style={styles.imagePreviewWrapper}>
+                                    <Image source={{ uri: img.uri }} style={styles.imagePreview} />
+                                    <TouchableOpacity style={styles.removeImageBtn} onPress={() => removeImage(index)}>
+                                        <Icon name="close" size={14} color="#fff" />
+                                    </TouchableOpacity>
+                                </View>
+                            ))}
+                        </View>
+                    </View>
+                )}
+
+                <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: '#007AFF' }]} onPress={handleSendMessage} disabled={isSendingMsg}>
+                    {isSendingMsg ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.btnText}>Send Now</Text>}
+                </TouchableOpacity>
+            </ScrollView>
+        )}
+        {/* --- END NEW CHANGES --- */}
+
         
         {/* TAB 1: LOGS */}
         {activeTab === 'logs' && (
@@ -729,7 +896,7 @@ const App = () => {
         {activeTab === 'docs' && (
             <ScrollView style={styles.logsContainer} contentContainerStyle={{ paddingBottom: 20 }}>
                 <Text style={styles.docHeader}>Integration Guide</Text>
-                <Text style={styles.docDesc}>Send POST requests to this endpoint. You can now specify "sms", "whatsapp", or "both" in the type field.</Text>
+                <Text style={styles.docDesc}>Send POST requests to this endpoint. You can now specify "sms", "whatsapp", or "both" in the type field, and optionally pass a mediaUrls array for WhatsApp photos.</Text>
                 <View style={styles.endpointContainer}>
                     <Icon name="link-variant" size={16} color="#007AFF" style={{ marginRight: 8 }} />
                     <Text style={styles.endpointUrl} selectable>{API_URL}/send-message</Text>
@@ -829,7 +996,19 @@ const styles = StyleSheet.create({
   lastSeen: { color: '#71717A', fontSize: 12, fontStyle: 'italic', marginTop: 8 },
   statusDot: { width: 10, height: 10, borderRadius: 5 },
   deleteBtn: { backgroundColor: '#270000', padding: 12, borderRadius: 10, marginTop: 16, alignItems: 'center', borderWidth: 1, borderColor: '#ff4444' },
-  deleteBtnText: { color: '#ff4444', fontWeight: 'bold', fontSize: 13, letterSpacing: 0.5 }
+  deleteBtnText: { color: '#ff4444', fontWeight: 'bold', fontSize: 13, letterSpacing: 0.5 },
+
+  // --- NEW CHANGES: SEND TAB STYLES ---
+  typeBtn: { paddingVertical: 10, paddingHorizontal: 20, borderRadius: 8, borderWidth: 1, borderColor: '#27272A', backgroundColor: '#09090B' },
+  typeBtnActive: { backgroundColor: '#27272A', borderColor: '#007AFF' },
+  typeBtnText: { color: '#71717A', fontWeight: 'bold' },
+  typeBtnTextActive: { color: '#007AFF' },
+  imagePickerContainer: { marginBottom: 16, padding: 12, backgroundColor: '#18181B', borderRadius: 12, borderWidth: 1, borderColor: '#27272A' },
+  pickImageBtn: { flexDirection: 'row', alignItems: 'center', padding: 12, backgroundColor: '#27272A', borderRadius: 8, justifyContent: 'center', marginBottom: 12 },
+  imagePreviewRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  imagePreviewWrapper: { position: 'relative', width: 60, height: 60 },
+  imagePreview: { width: '100%', height: '100%', borderRadius: 8 },
+  removeImageBtn: { position: 'absolute', top: -5, right: -5, backgroundColor: '#f44', borderRadius: 12, padding: 2 }
 });
 
 export default App;
